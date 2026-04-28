@@ -1956,7 +1956,8 @@ void create_column_stats_impl(
     auto index_future = store->read(versioned_item.key_);
 
     using OptionalSeg = std::optional<SegmentInMemory>;
-    auto column_stats_future = store->read(column_stats_key)
+    storage::ReadKeyOpts stats_read_opts{.dont_warn_about_missing_key = true};
+    auto column_stats_future = store->read(column_stats_key, stats_read_opts)
                                        .thenValue([](std::pair<VariantKey, SegmentInMemory>&& key_seg) -> OptionalSeg {
                                            return std::move(key_seg.second);
                                        });
@@ -2788,8 +2789,9 @@ static folly::Future<VersionIdentifier> fetch_index_and_column_stats(
     folly::Future<OptionalKeySeg> column_stats_future = folly::makeFuture<OptionalKeySeg>(std::nullopt);
     if (need_column_stats) {
         auto column_stats_key = index_key_to_column_stats_key(versioned_item.key_);
+        storage::ReadKeyOpts stats_read_opts{.dont_warn_about_missing_key = true};
         column_stats_future =
-                store->read(column_stats_key)
+                store->read(column_stats_key, stats_read_opts)
                         .thenValue([](std::pair<VariantKey, SegmentInMemory>&& key_seg) -> OptionalKeySeg {
                             return std::move(key_seg.second);
                         });
@@ -2851,18 +2853,6 @@ std::shared_ptr<PipelineContext> setup_pipeline_context(
                 util::raise_rte("setup_pipeline_context should not receive a bare VersionedItem; "
                                 "callers must resolve to IndexInformation first");
             },
-            [&](const std::shared_ptr<PreloadedIndexQuery>& preloaded_index_query) {
-                pipeline_context->stream_id_ = preloaded_index_query->index_key_.id();
-                // The PreloadedIndexQuery should be reusable if collect() is called multiple times on the same lazy
-                // dataframe, hence the clone
-                auto missing_stats_seg = std::nullopt; // TODO aseaton support column stats with preloaded index reads,
-                                                       // for Polars plugin Monday: 11526152128
-                IndexInformation cloned_index{
-                        {preloaded_index_query->index_key_, preloaded_index_query->index_seg_.clone()},
-                        missing_stats_seg
-                };
-                read_indexed_keys_to_pipeline(pipeline_context, read_query, read_options, cloned_index);
-            },
             [&](const std::shared_ptr<IndexInformation>& index_info) {
                 pipeline_context->stream_id_ = to_atom(index_info->index_.first).id();
                 read_indexed_keys_to_pipeline(pipeline_context, read_query, read_options, *index_info);
@@ -2917,9 +2907,6 @@ VersionedItem generate_result_versioned_item(const VersionIdentifier& version_in
                                              .build<KeyType::TABLE_INDEX>(stream_id));
             },
             [](const VersionedItem& versioned_item) { return versioned_item; },
-            [](const std::shared_ptr<PreloadedIndexQuery>& preloaded_index_query) {
-                return VersionedItem(preloaded_index_query->index_key_);
-            },
             [](const std::shared_ptr<IndexInformation>& index_info) {
                 return VersionedItem(to_atom(index_info->index_.first));
             }
